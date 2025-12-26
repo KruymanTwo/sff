@@ -1,15 +1,29 @@
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from aiogram import Router
 from aiogram.types import Message, CallbackQuery
-from sqlalchemy import select, delete, update
+from sqlalchemy import select, update
 from db import AsyncSessionLocal
-from models import Warn, RoleAssignment
+from models import Warn, RoleAssignment, Nick
 from utils import parse_duration, format_timedelta_remaining
 from keyboards import page_kb
 from config import cfg
 
 router = Router()
+
+
+async def format_user_link(chat_id: int, user_id: int, bot, session):
+    q = await session.execute(select(Nick).where(Nick.chat_id == chat_id, Nick.user_id == user_id))
+    nick = q.scalars().first()
+    if nick:
+        display = nick.nick
+    else:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            display = member.user.full_name
+        except Exception:
+            display = str(user_id)
+    return f'<a href="tg://user?id={user_id}">{display}</a>'
 
 
 @router.message(lambda message: message.text and re.match(r"^(варн|\+варн|\+пред|пред)\b", message.text.strip(), re.IGNORECASE))
@@ -36,8 +50,7 @@ async def cmd_warn(message: Message):
     else:
         token = parts[1]
         if token.startswith("@"):
-            # prefer reply or numeric id to avoid username resolution issues
-            await message.reply("Пожалуйста, ответьте на сообщение пользователя или укажите его id (не @username).", parse_mode=cfg.PARSE_MODE)
+            await message.reply("Пожалуйста, используйте reply на сообщение пользователя или укажите его id (не @username).", parse_mode=cfg.PARSE_MODE)
             return
         if token.isdigit():
             target_id = int(token)
@@ -82,8 +95,10 @@ async def cmd_warn(message: Message):
         session.add(w)
         await session.commit()
         await session.refresh(w)
+        link = await format_user_link(chat_id, target_id, message.bot, session)
+
     until_text = until_dt.strftime("%H:%M:%S %d.%m.%Y") if until_dt else "без срока"
-    await message.reply(f"⚠️ {target_id} получил предупреждение до {until_text} за: {reason or 'Причина не указана'}.", parse_mode=cfg.PARSE_MODE)
+    await message.reply(f"⚠️ {link} получил предупреждение до {until_text} за: {reason or 'Причина не указана'}.", parse_mode=cfg.PARSE_MODE)
 
 
 @router.message(lambda message: message.text and re.match(r"^(-варн|-пред|снять)\b", message.text.strip(), re.IGNORECASE))
@@ -101,7 +116,7 @@ async def cmd_unwarn(message: Message):
     if not target_id:
         await message.reply("Ответьте на сообщение пользователя или укажите его id.", parse_mode=cfg.PARSE_MODE)
         return
-    # optional: check permission to remove warn (only moderator+), for now allow same roles
+    # permission check: only moderator+ can remove
     issuer = message.from_user.id
     async with AsyncSessionLocal() as session:
         q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == issuer))
@@ -111,11 +126,15 @@ async def cmd_unwarn(message: Message):
             return
         await session.execute(update(Warn).where(Warn.chat_id == chat_id, Warn.user_id == target_id, Warn.active == True).values(active=False))
         await session.commit()
-    await message.reply(f"✅ С {target_id} было снято предупреждение.", parse_mode=cfg.PARSE_MODE)
+        link = await format_user_link(chat_id, target_id, message.bot, session)
+    await message.reply(f"✅ С {link} было снято предупреждение.", parse_mode=cfg.PARSE_MODE)
 
 
 @router.message(lambda message: message.text and re.match(r"^(\?пред|\?варн)(\s+(\d+))?$", message.text.strip(), re.IGNORECASE))
 async def cmd_list_warns(message: Message):
+    """
+    ?пред or ?варн optionally with page number: '?пред 2'
+    """
     chat_id = message.chat.id
     text = message.text.strip()
     parts = text.split()
@@ -138,11 +157,15 @@ async def cmd_list_warns(message: Message):
     text_lines.append("⚠️ Активные предупреждения в чате")
     text_lines.append(f"┌─ Всего активных предупреждений: {total}")
     text_lines.append("├─ Список предупреждений:")
-    for idx, w in enumerate(page_warns, start=start + 1):
-        rem = format_timedelta_remaining(w.until) if w.until else "без срока"
-        text_lines.append(f"│   {idx}. {w.user_id} наказан за {w.reason or 'Причина не указана'} до ({rem})")
+    # we need to fetch links - open a session for that
+    async with AsyncSessionLocal() as session:
+        for idx, w in enumerate(page_warns, start=start + 1):
+            rem = format_timedelta_remaining(w.until) if w.until else "без срока"
+            link = await format_user_link(chat_id, w.user_id, message.bot, session)
+            text_lines.append(f"│   {idx}. {link} наказан за {w.reason or 'Причина не указана'} до ({rem})")
     text_lines.append(f"└─ Страница: {page}/{total_pages}")
     kb = page_kb(page, prefix="warns")
+    # send initial message with inline keyboard; subsequent presses will edit this message
     await message.reply("\n".join(text_lines), reply_markup=kb, parse_mode=cfg.PARSE_MODE)
 
 
@@ -167,18 +190,23 @@ async def cb_warns_page(query: CallbackQuery):
 
     start = (page - 1) * per_page
     page_warns = warns[start:start + per_page]
+
     text_lines = []
     text_lines.append("⚠️ Активные предупреждения в чате")
     text_lines.append(f"┌─ Всего активных предупреждений: {total}")
     text_lines.append("├─ Список предупреждений:")
-    for idx, w in enumerate(page_warns, start=start + 1):
-        rem = format_timedelta_remaining(w.until) if w.until else "без срока"
-        text_lines.append(f"│   {idx}. {w.user_id} наказан за {w.reason or 'Причина не указана'} до ({rem})")
+    async with AsyncSessionLocal() as session:
+        for idx, w in enumerate(page_warns, start=start + 1):
+            rem = format_timedelta_remaining(w.until) if w.until else "без срока"
+            link = await format_user_link(chat_id, w.user_id, query.bot, session)
+            text_lines.append(f"│   {idx}. {link} наказан за {w.reason or 'Причина не указана'} до ({rem})")
     text_lines.append(f"└─ Страница: {page}/{total_pages}")
     kb = page_kb(page, prefix="warns")
+    # Edit the original message (do not send a new one)
     try:
         await query.message.edit_text("\n".join(text_lines), reply_markup=kb, parse_mode=cfg.PARSE_MODE)
-    except Exception:
-        # fallback to answering new message if edit fails
-        await query.message.reply("\n".join(text_lines), reply_markup=kb, parse_mode=cfg.PARSE_MODE)
+    except Exception as e:
+        # if editing fails, just answer the callback (do not create new message)
+        await query.answer("Не удалось обновить сообщение.", show_alert=False)
+        return
     await query.answer()
