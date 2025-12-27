@@ -3,6 +3,8 @@ from datetime import datetime
 from aiogram import Router
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select, update
+# Импортируем desc для сортировки (чтобы снимать последнее наказание)
+from sqlalchemy import desc
 from db import AsyncSessionLocal
 from models import Warn, RoleAssignment, Nick
 from utils import parse_duration, format_timedelta_remaining
@@ -26,31 +28,49 @@ async def format_user_link(chat_id: int, user_id: int, bot, session):
     return f'<a href="tg://user?id={user_id}">{display}</a>'
 
 
-@router.message(lambda message: message.text and re.match(r"^(варн|\+варн|\+пред|пред)\b", message.text.strip(), re.IGNORECASE))
+# --- ХЕНДЛЕР ВЫДАЧИ ПРЕДУПРЕЖДЕНИЯ ---
+@router.message(
+    lambda message: message.text and re.match(r"^(варн|\+варн|\+пред|пред)\b", message.text.strip(), re.IGNORECASE))
 async def cmd_warn(message: Message):
     parts = message.text.strip().split(maxsplit=2)
+
+    # 1. ПРОВЕРКА: Если написали просто "пред" или "+пред" без аргументов и без реплая
+    # Выводим красивую справку
     if len(parts) < 2 and not message.reply_to_message:
-        await message.reply("Использование: варн [@user или reply] [время (например 10m, 1h)] [причина опционально]", parse_mode=cfg.PARSE_MODE)
+        help_text = (
+            "<b>ℹ️ Справка по команде:</b>\n\n"
+            "Используйте: <code>+пред</code> [время] [причина]\n"
+            "Или ответом на сообщение: <code>+пред</code> [время]\n\n"
+            "<i>Примеры:</i>\n"
+            "• <code>+пред 10м Спам</code>\n"
+            "• <code>+пред 1ч Оскорбление</code>\n"
+            "• <code>+пред 1д</code> (без причины)"
+        )
+        await message.reply(help_text, parse_mode="HTML")
         return
+
     # Who issues?
     issuer = message.from_user.id
     chat_id = message.chat.id
 
-    # Check issuer role: only users with role_id >= 1 (Мл. модератор и выше) can warn
+    # Check issuer role
     async with AsyncSessionLocal() as session:
-        q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == issuer))
+        q = await session.execute(
+            select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == issuer))
         caller_assign = q.scalars().first()
     if not caller_assign or caller_assign.role_id < 1:
         await message.reply("Вы не имеете права выдавать предупреждения.", parse_mode=cfg.PARSE_MODE)
         return
 
-    # target
+    # target detection
     if message.reply_to_message and message.reply_to_message.from_user:
         target_id = message.reply_to_message.from_user.id
     else:
         token = parts[1]
         if token.startswith("@"):
-            await message.reply("Пожалуйста, используйте reply на сообщение пользователя или укажите его id (не @username).", parse_mode=cfg.PARSE_MODE)
+            await message.reply(
+                "Пожалуйста, используйте reply на сообщение пользователя или укажите его id (не @username).",
+                parse_mode=cfg.PARSE_MODE)
             return
         if token.isdigit():
             target_id = int(token)
@@ -61,6 +81,8 @@ async def cmd_warn(message: Message):
     # parse time and reason
     time_td = None
     reason = None
+
+    # Логика разбора аргументов
     if message.reply_to_message:
         if len(parts) >= 2:
             maybe_time = parts[1]
@@ -88,7 +110,8 @@ async def cmd_warn(message: Message):
 
     until_dt = None
     if time_td:
-        until_dt = datetime.utcnow() + time_td
+        # Используем .now() для корректного локального времени
+        until_dt = datetime.now() + time_td
 
     async with AsyncSessionLocal() as session:
         w = Warn(chat_id=chat_id, user_id=target_id, issued_by=issuer, reason=reason, until=until_dt, active=True)
@@ -98,14 +121,18 @@ async def cmd_warn(message: Message):
         link = await format_user_link(chat_id, target_id, message.bot, session)
 
     until_text = until_dt.strftime("%H:%M:%S %d.%m.%Y") if until_dt else "без срока"
-    await message.reply(f"⚠️ {link} получил предупреждение до {until_text} за: {reason or 'Причина не указана'}.", parse_mode=cfg.PARSE_MODE)
+    await message.reply(f"⚠️ {link} получил предупреждение до {until_text} за: {reason or 'Причина не указана'}.",
+                        parse_mode=cfg.PARSE_MODE)
 
 
-@router.message(lambda message: message.text and re.match(r"^(-варн|-пред|снять)\b", message.text.strip(), re.IGNORECASE))
+# --- ХЕНДЛЕР СНЯТИЯ ПРЕДУПРЕЖДЕНИЯ ---
+@router.message(
+    lambda message: message.text and re.match(r"^(-варн|-пред|снять)\b", message.text.strip(), re.IGNORECASE))
 async def cmd_unwarn(message: Message):
     parts = message.text.strip().split(maxsplit=1)
     chat_id = message.chat.id
     target_id = None
+
     if message.reply_to_message and message.reply_to_message.from_user:
         target_id = message.reply_to_message.from_user.id
     else:
@@ -113,28 +140,47 @@ async def cmd_unwarn(message: Message):
             token = parts[1].split()[0]
             if token.isdigit():
                 target_id = int(token)
+
     if not target_id:
         await message.reply("Ответьте на сообщение пользователя или укажите его id.", parse_mode=cfg.PARSE_MODE)
         return
-    # permission check: only moderator+ can remove
+
     issuer = message.from_user.id
+
     async with AsyncSessionLocal() as session:
-        q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == issuer))
+        # Проверка прав
+        q = await session.execute(
+            select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == issuer))
         caller_assign = q.scalars().first()
         if not caller_assign or caller_assign.role_id < 1:
             await message.reply("Вы не имеете права снимать предупреждения.", parse_mode=cfg.PARSE_MODE)
             return
-        await session.execute(update(Warn).where(Warn.chat_id == chat_id, Warn.user_id == target_id, Warn.active == True).values(active=False))
-        await session.commit()
+
+        # !!! ИСПРАВЛЕНИЕ ЛОГИКИ СНЯТИЯ !!!
+        # Мы ищем только ПОСЛЕДНЕЕ активное предупреждение
+        stmt = select(Warn).where(
+            Warn.chat_id == chat_id,
+            Warn.user_id == target_id,
+            Warn.active == True
+        ).order_by(desc(Warn.created_at)).limit(1)
+
+        result = await session.execute(stmt)
+        warn_to_remove = result.scalars().first()
+
         link = await format_user_link(chat_id, target_id, message.bot, session)
-    await message.reply(f"✅ С {link} было снято предупреждение.", parse_mode=cfg.PARSE_MODE)
+
+        if warn_to_remove:
+            warn_to_remove.active = False
+            await session.commit()
+            await message.reply(f"✅ С {link} было снято 1 предупреждение.", parse_mode=cfg.PARSE_MODE)
+        else:
+            await message.reply(f"У пользователя {link} нет активных предупреждений.", parse_mode=cfg.PARSE_MODE)
 
 
-@router.message(lambda message: message.text and re.match(r"^(\?пред|\?варн)(\s+(\d+))?$", message.text.strip(), re.IGNORECASE))
+# --- ХЕНДЛЕР СПИСКА ПРЕДУПРЕЖДЕНИЙ ---
+@router.message(
+    lambda message: message.text and re.match(r"^(\?пред|\?варн)(\s+(\d+))?$", message.text.strip(), re.IGNORECASE))
 async def cmd_list_warns(message: Message):
-    """
-    ?пред or ?варн optionally with page number: '?пред 2'
-    """
     chat_id = message.chat.id
     text = message.text.strip()
     parts = text.split()
@@ -143,7 +189,8 @@ async def cmd_list_warns(message: Message):
         page = max(1, int(parts[1]))
     per_page = 10
     async with AsyncSessionLocal() as session:
-        q = await session.execute(select(Warn).where(Warn.chat_id == chat_id, Warn.active == True).order_by(Warn.created_at.desc()))
+        q = await session.execute(
+            select(Warn).where(Warn.chat_id == chat_id, Warn.active == True).order_by(Warn.created_at.desc()))
         warns = q.scalars().all()
     total = len(warns)
     total_pages = max(1, (total + per_page - 1) // per_page)
@@ -157,15 +204,15 @@ async def cmd_list_warns(message: Message):
     text_lines.append("⚠️ Активные предупреждения в чате")
     text_lines.append(f"┌─ Всего активных предупреждений: {total}")
     text_lines.append("├─ Список предупреждений:")
-    # we need to fetch links - open a session for that
+
     async with AsyncSessionLocal() as session:
         for idx, w in enumerate(page_warns, start=start + 1):
             rem = format_timedelta_remaining(w.until) if w.until else "без срока"
             link = await format_user_link(chat_id, w.user_id, message.bot, session)
             text_lines.append(f"│   {idx}. {link} наказан за {w.reason or 'Причина не указана'} до ({rem})")
+
     text_lines.append(f"└─ Страница: {page}/{total_pages}")
     kb = page_kb(page, prefix="warns")
-    # send initial message with inline keyboard; subsequent presses will edit this message
     await message.reply("\n".join(text_lines), reply_markup=kb, parse_mode=cfg.PARSE_MODE)
 
 
@@ -181,7 +228,8 @@ async def cb_warns_page(query: CallbackQuery):
     per_page = 10
     chat_id = query.message.chat.id
     async with AsyncSessionLocal() as session:
-        q = await session.execute(select(Warn).where(Warn.chat_id == chat_id, Warn.active == True).order_by(Warn.created_at.desc()))
+        q = await session.execute(
+            select(Warn).where(Warn.chat_id == chat_id, Warn.active == True).order_by(Warn.created_at.desc()))
         warns = q.scalars().all()
     total = len(warns)
     total_pages = max(1, (total + per_page - 1) // per_page)
@@ -202,11 +250,9 @@ async def cb_warns_page(query: CallbackQuery):
             text_lines.append(f"│   {idx}. {link} наказан за {w.reason or 'Причина не указана'} до ({rem})")
     text_lines.append(f"└─ Страница: {page}/{total_pages}")
     kb = page_kb(page, prefix="warns")
-    # Edit the original message (do not send a new one)
     try:
         await query.message.edit_text("\n".join(text_lines), reply_markup=kb, parse_mode=cfg.PARSE_MODE)
-    except Exception as e:
-        # if editing fails, just answer the callback (do not create new message)
+    except Exception:
         await query.answer("Не удалось обновить сообщение.", show_alert=False)
         return
     await query.answer()

@@ -1,55 +1,54 @@
 import re
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
+from typing import Optional, Union
+from dateutil.relativedelta import relativedelta
 
 _time_regex = re.compile(r"(?P<num>\d+)\s*(?P<unit>y|g|mon|мес|w|н|d|д|h|ч|m|м|s|с)$", re.IGNORECASE)
 
 
-def parse_duration(text: str) -> Optional[timedelta]:
-    """
-    Parse durations like:
-    10m/10м, 5s/5с, 2h/2ч, 3d/3д, 1w/1н, 1mon/1мес, 1y/1г
-    Returns timedelta or None
-    """
+def parse_duration(text: str) -> Optional[relativedelta]:
     s = text.strip().lower()
     m = _time_regex.match(s)
     if not m:
         return None
+
     num = int(m.group("num"))
     unit = m.group("unit")
-    if unit in ("s", "с"):
-        return timedelta(seconds=num)
-    if unit in ("m", "м"):
-        return timedelta(minutes=num)
-    if unit in ("h", "ч"):
-        return timedelta(hours=num)
-    if unit in ("d", "д"):
-        return timedelta(days=num)
-    if unit in ("w", "н"):
-        return timedelta(weeks=num)
-    if unit in ("mon", "мес"):
-        return timedelta(days=30 * num)
-    if unit in ("y", "г"):
-        return timedelta(days=365 * num)
+
+    # Используем только relativedelta для единообразия
+    units_map = {
+        ('s', 'с'): 'seconds',
+        ('m', 'м'): 'minutes',
+        ('h', 'ч'): 'hours',
+        ('d', 'д'): 'days',
+        ('w', 'н'): 'weeks',
+        ('mon', 'мес'): 'months',
+        ('y', 'г'): 'years'
+    }
+
+    for keys, attr in units_map.items():
+        if unit in keys:
+            return relativedelta(**{attr: num})
     return None
 
 
 def format_timedelta_remaining(until_dt: datetime) -> str:
-    now = datetime.utcnow()
+    # ИСПРАВЛЕНИЕ: используем .now() без utcnow, чтобы часовые пояса совпали
+    now = datetime.now()
     diff = until_dt - now
-    if diff.total_seconds() <= 0:
+
+    total_seconds = int(diff.total_seconds())
+    if total_seconds <= 0:
         return "закончено"
-    seconds = int(diff.total_seconds())
-    parts = []
-    days, seconds = divmod(seconds, 86400)
+
+    days, seconds = divmod(total_seconds, 86400)
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
-    if days:
-        parts.append(f"{days}д")
-    if hours:
-        parts.append(f"{hours}ч")
-    if minutes:
-        parts.append(f"{minutes}м")
-    if seconds and not parts:
-        parts.append(f"{seconds}с")
+
+    parts = []
+    if days: parts.append(f"{days}д")
+    if hours: parts.append(f"{hours}ч")
+    if minutes: parts.append(f"{minutes}м")
+    if not parts: parts.append(f"{seconds}с")
+
     return " ".join(parts)
