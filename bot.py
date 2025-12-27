@@ -9,6 +9,7 @@ from handlers.start_handler import router as start_router
 from handlers.roles_handler import router as roles_router
 from handlers.nicks_handler import router as nicks_router
 from handlers.warns_handler import router as warns_router
+from handlers.raven_handler import router as raven_router
 from db import AsyncSessionLocal
 from models import Chat, RoleAssignment
 from sqlalchemy import select
@@ -16,30 +17,26 @@ from sqlalchemy import select
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# NOTE: parse_mode must NOT be passed to Bot() in aiogram >=3.7.
+
 bot = Bot(token=cfg.BOT_TOKEN)
 dp = Dispatcher()
 
-# Register routers
+
 dp.include_router(start_router)
 dp.include_router(roles_router)
 dp.include_router(nicks_router)
 dp.include_router(warns_router)
-
+dp.include_router(raven_router)
 
 @dp.my_chat_member()
 async def on_my_chat_member(update: types.ChatMemberUpdated):
-    """
-    Auto assign Owner role when bot is added to a chat.
-    More robust owner detection: use get_chat_administrators and pick status == 'creator'.
-    """
+
     try:
-        # If bot was added to the chat (or promoted), try to detect and assign owner
+
         chat = update.chat
         if chat is None:
             return
 
-        # Ensure chat exists
         async with AsyncSessionLocal() as session:
             q = await session.execute(select(Chat).where(Chat.id == chat.id))
             ch = q.scalars().first()
@@ -48,7 +45,6 @@ async def on_my_chat_member(update: types.ChatMemberUpdated):
                 session.add(ch)
                 await session.commit()
 
-        # Get admins and find creator
         try:
             admins = await bot.get_chat_administrators(chat.id)
         except Exception as e:
@@ -57,8 +53,7 @@ async def on_my_chat_member(update: types.ChatMemberUpdated):
 
         owner = None
         for a in admins:
-            # In API 'creator' marks chat owner
-            # a.status is usually a string like 'creator' or ChatMemberStatus.CREATOR
+
             if getattr(a, "status", "").lower() == "creator":
                 owner = a.user
                 break
@@ -88,6 +83,7 @@ async def main():
     commands = [
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="admins", description="Показать список админов"),
+        BotCommand(command="send_raven_bot", description="(создатели) отправить сообщение от бота по ссылке"),
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 

@@ -10,8 +10,24 @@ load_dotenv()
 class Config:
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///woxl.db")
-    # HTML parse mode globally
     PARSE_MODE: str = "HTML"
+
+    CREATOR_IDS_RAW: str = os.getenv("CREATOR_IDS", "")
+
+    @property
+    def CREATOR_IDS(self):
+        s = self.CREATOR_IDS_RAW or ""
+        ids = set()
+        for part in s.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if part.lstrip().isdigit():
+                try:
+                    ids.add(int(part))
+                except ValueError:
+                    pass
+        return ids
 
 
 cfg = Config()
