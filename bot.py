@@ -82,8 +82,7 @@ async def main():
     # set bot commands
     commands = [
         BotCommand(command="start", description="Запустить бота"),
-        BotCommand(command="admins", description="Показать список админов"),
-        BotCommand(command="send_raven_bot", description="(создатели) отправить сообщение от бота по ссылке"),
+        BotCommand(command="admins", description="Показать список админов")
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 

@@ -1,5 +1,5 @@
 import re
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.types import Message
 from db import AsyncSessionLocal
 from models import Nick
@@ -9,21 +9,47 @@ from config import cfg
 router = Router()
 
 
-@router.message(lambda message: message.text and re.match(r"^ник\b", message.text.strip(), re.IGNORECASE))
-async def cmd_set_nick(message: Message):
-    parts = message.text.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        await message.reply("Использование: ник [новое имя]", parse_mode=cfg.PARSE_MODE)
-        return
-    new_nick = parts[1].strip()
-    if not new_nick:
-        await message.reply("Ник не может быть пустым.", parse_mode=cfg.PARSE_MODE)
-        return
+@router.message(lambda message: message.text and re.match(r"^-ник\b", message.text.strip(), re.IGNORECASE))
+async def cmd_del_nick(message: Message):
     chat_id = message.chat.id
     user_id = message.from_user.id
+
     async with AsyncSessionLocal() as session:
         q = await session.execute(select(Nick).where(Nick.chat_id == chat_id, Nick.user_id == user_id))
         existing = q.scalars().first()
+
+        if existing:
+            await session.delete(existing)
+            await session.commit()
+            await message.reply("🗑 Ваш ник был удален.", parse_mode="HTML")
+        else:
+            await message.reply("У вас и так нет установленного ника.", parse_mode="HTML")
+
+
+@router.message(lambda message: message.text and (
+        re.match(r"^\+ник\b", message.text.strip(), re.IGNORECASE) or
+        re.match(r"^ник\s+\S+", message.text.strip(), re.IGNORECASE)
+))
+async def cmd_set_nick(message: Message):
+    parts = message.text.strip().split(maxsplit=1)
+
+    # Если ввели просто "+ник" без имени
+    if len(parts) < 2:
+        await message.reply("Использование: ник [новое имя] или +ник [новое имя]", parse_mode="HTML")
+        return
+
+    new_nick = parts[1].strip()
+    if not new_nick:
+        await message.reply("Ник не может быть пустым.", parse_mode="HTML")
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        q = await session.execute(select(Nick).where(Nick.chat_id == chat_id, Nick.user_id == user_id))
+        existing = q.scalars().first()
+
         if existing:
             existing.nick = new_nick
             session.add(existing)
@@ -31,58 +57,88 @@ async def cmd_set_nick(message: Message):
             n = Nick(chat_id=chat_id, user_id=user_id, nick=new_nick)
             session.add(n)
         await session.commit()
+
     user_link = f'<a href="tg://user?id={user_id}">{new_nick}</a>'
-    await message.reply(f"✅ Имя изменено на {user_link}!", parse_mode=cfg.PARSE_MODE)
+    await message.reply(f"✅ Имя изменено на {user_link}!", parse_mode="HTML")
 
 
-@router.message(lambda message: message.text and re.match(r"^(ник|\?ник)\b", message.text.strip(), re.IGNORECASE))
+@router.message(lambda message: message.text and re.match(r"^(\?ник|ник)\b", message.text.strip(), re.IGNORECASE))
 async def cmd_get_nick(message: Message):
     parts = message.text.strip().split()
     chat_id = message.chat.id
-    async with AsyncSessionLocal() as session:
-        if len(parts) == 1:
-            # show own nick
-            q = await session.execute(select(Nick).where(Nick.chat_id == chat_id, Nick.user_id == message.from_user.id))
-            existing = q.scalars().first()
-            if existing:
-                user_link = f'<a href="tg://user?id={message.from_user.id}">{existing.nick}</a>'
-                await message.reply(f"🍊 Ваш зовут {user_link}.", parse_mode=cfg.PARSE_MODE)
-            else:
-                # fallback to telegram name
-                try:
-                    member = await message.bot.get_chat_member(chat_id, message.from_user.id)
-                    name = member.user.full_name
-                    user_link = f'<a href="tg://user?id={message.from_user.id}">{name}</a>'
-                    await message.reply(f"🍊 Ваш зовут {user_link}.", parse_mode=cfg.PARSE_MODE)
-                except Exception:
-                    await message.reply("У вас нет ника. Установите с помощью: ник [имя]", parse_mode=cfg.PARSE_MODE)
+    target_user_id = None
+    target_name_fallback = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user_id = message.reply_to_message.from_user.id
+        target_name_fallback = message.reply_to_message.from_user.full_name
+
+    elif len(parts) > 1:
+        arg = parts[1]
+
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "text_mention" and entity.user:
+                    target_user_id = entity.user.id
+                    target_name_fallback = entity.user.full_name
+                    break
+                elif entity.type == "mention" and arg.startswith("@"):
+
+                    try:
+
+                        username = arg.lstrip("@")
+                        pass
+                    except Exception:
+                        pass
+
+        # Если ID не найден через entities, пробуем числовой ID
+        if not target_user_id and arg.isdigit():
+            target_user_id = int(arg)
+
+        # Если всё еще нет ID и это похоже на @username, попробуем найти в чате (может вызвать ошибку, если юзера нет)
+        if not target_user_id and arg.startswith("@"):
+            await message.reply(
+                "Для просмотра ника по @username, боту сложно определить ID. Пожалуйста, <b>ответьте</b> на сообщение пользователя командой <code>?ник</code>.",
+                parse_mode="HTML")
             return
-        # get nick of another user (reply or id)
-        target = None
-        if message.reply_to_message and message.reply_to_message.from_user:
-            target = message.reply_to_message.from_user.id
-        else:
-            token = parts[1]
-            if token.startswith("@"):
-                # cannot resolve to id without extra API call — ask to reply or provide id
-                await message.reply(f"Пожалуйста, ответьте на сообщение пользователя или укажите его id (не @username).", parse_mode=cfg.PARSE_MODE)
-                return
-            if token.isdigit():
-                target = int(token)
-        if target:
-            q = await session.execute(select(Nick).where(Nick.chat_id == chat_id, Nick.user_id == target))
-            existing = q.scalars().first()
+
+
+    else:
+        target_user_id = message.from_user.id
+        target_name_fallback = message.from_user.full_name
+
+
+    if not target_user_id:
+        await message.reply("Не удалось определить пользователя. Ответьте на сообщение или укажите ID.",
+                            parse_mode="HTML")
+        return
+
+    # ЗАПРОС К БАЗЕ
+    async with AsyncSessionLocal() as session:
+        q = await session.execute(select(Nick).where(Nick.chat_id == chat_id, Nick.user_id == target_user_id))
+        existing = q.scalars().first()
+
+        # Если просматриваем СЕБЯ
+        if target_user_id == message.from_user.id:
             if existing:
-                user_link = f'<a href="tg://user?id={target}">{existing.nick}</a>'
-                await message.reply(f"Это пользователь {user_link}.", parse_mode=cfg.PARSE_MODE)
+                user_link = f'<a href="tg://user?id={target_user_id}">{existing.nick}</a>'
+                await message.reply(f"🍊 Вас зовут {user_link}.", parse_mode="HTML")
             else:
-                # fallback to telegram name if possible
-                try:
-                    member = await message.bot.get_chat_member(chat_id, target)
-                    name = member.user.full_name
-                    user_link = f'<a href="tg://user?id={target}">{name}</a>'
-                    await message.reply(f"Это пользователь {user_link}.", parse_mode=cfg.PARSE_MODE)
-                except Exception:
-                    await message.reply("У пользователя нет ника.", parse_mode=cfg.PARSE_MODE)
+                user_link = f'<a href="tg://user?id={target_user_id}">{target_name_fallback}</a>'
+                await message.reply(f"🍊 Вас зовут {user_link}. (Ник не установлен)", parse_mode="HTML")
+
+        # Если просматриваем ДРУГОГО
         else:
-            await message.reply("Не удалось определить пользователя. Ответьте на сообщение или укажите id.", parse_mode=cfg.PARSE_MODE)
+            if existing:
+                user_link = f'<a href="tg://user?id={target_user_id}">{existing.nick}</a>'
+                await message.reply(f"Это пользователь {user_link}.", parse_mode="HTML")
+            else:
+                if not target_name_fallback:
+                    try:
+                        member = await message.bot.get_chat_member(chat_id, target_user_id)
+                        target_name_fallback = member.user.full_name
+                    except Exception:
+                        target_name_fallback = "Пользователь"
+
+                user_link = f'<a href="tg://user?id={target_user_id}">{target_name_fallback}</a>'
+                await message.reply(f"Это пользователь {user_link}. (Ник не установлен)", parse_mode="HTML")

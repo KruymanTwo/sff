@@ -19,7 +19,7 @@ async def cmd_send_raven_bot(message: Message):
     if len(parts) < 3:
         await message.reply(
             "Использование: /send_raven_bot [ссылка] [текст]\n"
-            "Пример: /send_raven_bot https://t.me/c/3413026178/1 Привет всем",
+            "Пример: /send_raven_bot https://t.me/c/0000000000/0 Привет всем",
             parse_mode=cfg.PARSE_MODE,
         )
         return
