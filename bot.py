@@ -10,23 +10,31 @@ from handlers.roles_handler import router as roles_router
 from handlers.nicks_handler import router as nicks_router
 from handlers.warns_handler import router as warns_router
 from handlers.raven_handler import router as raven_router
+from handlers.moderation_handler import router as moderation_router
+from handlers.ping_handler import router as ping_router
 from db import AsyncSessionLocal
 from models import Chat, RoleAssignment
 from sqlalchemy import select
+from datetime import datetime
+from handlers.new_year_handler import router as new_year_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 bot = Bot(token=cfg.BOT_TOKEN)
 dp = Dispatcher()
 
+START_TIME = datetime.utcnow()
 
 dp.include_router(start_router)
 dp.include_router(roles_router)
 dp.include_router(nicks_router)
 dp.include_router(warns_router)
 dp.include_router(raven_router)
+dp.include_router(moderation_router)
+dp.include_router(ping_router)
+dp.include_router(new_year_router)
+
 
 @dp.my_chat_member()
 async def on_my_chat_member(update: types.ChatMemberUpdated):
@@ -60,7 +68,6 @@ async def on_my_chat_member(update: types.ChatMemberUpdated):
 
         if owner:
             async with AsyncSessionLocal() as session:
-                # assign owner role (5)
                 q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat.id, RoleAssignment.user_id == owner.id))
                 existing = q.scalars().first()
                 if existing:
@@ -81,7 +88,8 @@ async def main():
 
     commands = [
         BotCommand(command="start", description="Запустить бота"),
-        BotCommand(command="admins", description="Показать список админов")
+        BotCommand(command="admins", description="Показать список админов"),
+        BotCommand(command="ping", description="Пинг и информация")
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 

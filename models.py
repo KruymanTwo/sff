@@ -1,13 +1,12 @@
-from sqlalchemy import Column, Integer, BigInteger, String, Text, Boolean, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime
 
-Base = declarative_base()
+from sqlalchemy import Column, Integer, BigInteger, String, Text, Boolean, DateTime
+from datetime import datetime
+from db import Base
 
 ROLE_MAP = {
     1: ("Мл. Модератор", ""),
     2: ("Модератор", ""),
-    3: ("Мл. Администратор", ""),
+    3: ("Старший Модератор", ""),
     4: ("Администратор", ""),
     5: ("Владелец", "")
 }

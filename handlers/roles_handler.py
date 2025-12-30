@@ -149,7 +149,7 @@ async def cmd_promote(message: Message):
         parse_mode="HTML")
 
 
-@router.message(F.text.regexp(r"(?i)^(\+|!|/)?(|снять|разжаловать|demote|unrole)\b"))
+@router.message(F.text.regexp(r"(?i)^(\+|!|/)?(снять|разжаловать|demote|unrole)\b"))
 async def cmd_demote(message: Message):
     parts = message.text.strip().split()
     issuer_id = message.from_user.id
