@@ -76,7 +76,7 @@ async def on_my_chat_member(update: types.ChatMemberUpdated):
 
 
 async def main():
-    # init DB
+
     await init_db()
 
     # set bot commands
