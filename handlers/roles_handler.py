@@ -1,234 +1,194 @@
 import re
-from datetime import datetime
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.types import Message
-from sqlalchemy import select, delete
+from sqlalchemy import select
 from db import AsyncSessionLocal
-from models import RoleAssignment, Chat, ROLE_MAP, Nick
-from config import cfg
+from models import RoleAssignment, Nick
 
 router = Router()
 
-# Helpers
-async def get_role_assignments(session, chat_id):
-    q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id))
-    return q.scalars().all()
+ROLE_MAP = {
+    5: "👑 Владелец",
+    4: "🛡 Администратор",
+    3: "⚔️ Мл. Администратор",
+    2: "👮‍♂️ Модератор",
+    1: "🔎 Мл. Модератор"
+}
 
-
-def role_name(role_id: int) -> str:
-    return ROLE_MAP.get(role_id, ("Неизвестно", ""))[0]
+ROLE_NAMES = {
+    "владелец": 5, "owner": 5, "create": 5,
+    "администратор": 4, "админ": 4, "admin": 4,
+    "мл.администратор": 3, "младмин": 3, "мл.админ": 3,
+    "модератор": 2, "модер": 2, "mod": 2,
+    "мл.модератор": 1, "мл.модер": 1, "хелпер": 1, "helper": 1
+}
 
 
 async def format_user_link(chat_id: int, user_id: int, bot, session):
-    """
-    Return HTML link with displayed name:
-    - prefer stored Nick in DB
-    - else use Telegram full name from get_chat_member
-    """
-    # check nick in DB
-    q = await session.execute(select(Nick).where(Nick.chat_id == chat_id, Nick.user_id == user_id))
-    nick = q.scalars().first()
-    if nick:
-        display = nick.nick
-    else:
-        try:
+    try:
+        q = await session.execute(select(Nick).where(Nick.chat_id == chat_id, Nick.user_id == user_id))
+        nick = q.scalars().first()
+        if nick:
+            display = nick.nick
+        else:
             member = await bot.get_chat_member(chat_id, user_id)
-            u = member.user
-            display = u.full_name
-        except Exception:
-            display = str(user_id)
-    # Escape is not done here; we rely on simple names. For safety you can html-escape if needed.
-    return f'<a href="tg://user?id={user_id}">{display}</a>'
+            display = member.user.full_name
+        return f'<a href="tg://user?id={user_id}">{display}</a>'
+    except Exception:
+        return f'<a href="tg://user?id={user_id}">{user_id}</a>'
 
 
-async def parse_target_user_from_message(message: Message):
-    """
-    Returns (user_id, display_token) or (None, None)
-    - if reply present -> use replied user
-    - if numeric id provided -> use that
-    - @username not resolved here (prefer reply or id)
-    """
-    if message.reply_to_message and message.reply_to_message.from_user:
-        u = message.reply_to_message.from_user
-        return u.id, u.full_name
+@router.message(
+    F.text.lower().in_({"?админ", "админы", "?админы", "admins", "/staff", "/admins", "список администрации"}))
+async def cmd_staff_list(message: Message):
+    chat_id = message.chat.id
+
+    async with AsyncSessionLocal() as session:
+        q = await session.execute(
+            select(RoleAssignment)
+            .where(RoleAssignment.chat_id == chat_id)
+            .order_by(RoleAssignment.role_id.desc())
+        )
+        all_staff = q.scalars().all()
+
+        grouped_roles = {5: [], 4: [], 3: [], 2: [], 1: []}
+
+        for staff_member in all_staff:
+            if staff_member.role_id in grouped_roles:
+                link = await format_user_link(chat_id, staff_member.user_id, message.bot, session)
+                grouped_roles[staff_member.role_id].append(link)
+
+    lines = ["<b>🍊 Список администраторов</b>\n"]
+    has_staff = False
+
+    for role_id in [5, 4, 3, 2, 1]:
+        users = grouped_roles[role_id]
+        if users:
+            has_staff = True
+            role_name = ROLE_MAP.get(role_id, "Роль")
+            lines.append(f"<b>[{role_id}] {role_name}</b>")
+            for user_link in users:
+                lines.append(f" • {user_link}")
+            lines.append("")
+
+    if not has_staff:
+        await message.reply("ℹ️ <b>В этом чате список администрации пуст.</b>", parse_mode="HTML")
+    else:
+        await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(F.text.regexp(r"(?i)^(\+|!|/)?(админ|назначить|повысить|setrole|promote)\b"))
+async def cmd_promote(message: Message):
     parts = message.text.strip().split()
-    # try numeric id or @username token
-    for p in parts[1:]:
-        if p.isdigit():
-            return int(p), p
-        if p.startswith("@"):
-            return None, p
-    return None, None
-
-
-@router.message(lambda message: message.text and re.match(r"^(админы|\?админ)$", message.text.strip(), re.IGNORECASE))
-async def cmd_list_admins(message: Message):
-    async with AsyncSessionLocal() as session:
-        assigns = await get_role_assignments(session, message.chat.id)
-        # build text with links
-        roles_map = {}
-        for a in assigns:
-            roles_map.setdefault(a.role_id, []).append(a)
-
-        text_lines = ["🍊 Список администраторов\n"]
-        for rid in sorted(ROLE_MAP.keys(), reverse=True):
-            title = ROLE_MAP[rid][0]
-            members = roles_map.get(rid, [])
-            text_lines.append(f"[{rid}] {title}")
-            if members:
-                for m in members:
-                    # build link using stored nick or telegram name
-                    link = await format_user_link(message.chat.id, m.user_id, message.bot, session)
-                    text_lines.append(f"{link}")
-            else:
-                text_lines.append("(пусто)")
-            text_lines.append("")  # spacer
-
-    await message.answer("\n".join(text_lines), parse_mode=cfg.PARSE_MODE)
-
-
-# Assign role command: +админ / +модер / выдать
-@router.message(lambda message: message.text and re.match(r"^(\+админ|\+модер|выдать)\b", message.text.strip(), re.IGNORECASE))
-async def cmd_assign(message: Message):
-    caller_id = message.from_user.id
+    issuer_id = message.from_user.id
     chat_id = message.chat.id
 
     async with AsyncSessionLocal() as session:
-        q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == caller_id))
-        caller_assign = q.scalars().first()
-    # check if caller is owner (role_id==5)
-    if not caller_assign or caller_assign.role_id != 5:
-        await message.reply("Только Владелец может выдавать админов.", parse_mode=cfg.PARSE_MODE)
+        q = await session.execute(
+            select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == issuer_id))
+        issuer_role = q.scalars().first()
+
+    issuer_level = issuer_role.role_id if issuer_role else 0
+
+    # Разрешаем только Владельцу (ID 5)
+    if issuer_level != 5:
+        await message.reply("<b>Только Владелец может назначать администраторов.</b>", parse_mode="HTML")
         return
 
-    target_user_id, target_display = await parse_target_user_from_message(message)
-    # default role to id 1 (Мл. Модератор)
-    role_id = 1
-    # optional reason: text after username/id
-    reason = None
+    target_id = None
+    role_arg = None
+
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        if len(parts) > 1:
+            role_arg = parts[1].lower()
+    else:
+        if len(parts) >= 3:
+            if parts[1].isdigit():
+                target_id = int(parts[1])
+            role_arg = parts[2].lower()
+
+    if not target_id or not role_arg:
+        await message.reply(
+            "<b>Используйте эту команду правильно:</b>\n<code>+повысить [id роли]</code>",
+            parse_mode="HTML")
+        return
+
+    new_role_id = ROLE_NAMES.get(role_arg) or (int(role_arg) if role_arg.isdigit() else None)
+
+    if not new_role_id or new_role_id not in ROLE_MAP:
+        await message.reply(f"<b>Неизвестная роль.</b>\nДоступные: {', '.join([str(k) for k in ROLE_MAP.keys()])}",
+                            parse_mode="HTML")
+        return
+
+    # Владелец не может выдать роль 5 (другого владельца) через эту команду, если нужно - можно убрать проверку
+    if new_role_id >= issuer_level:
+        await message.reply("<b>Вы не можете выдать роль выше или равную своей.</b>", parse_mode="HTML")
+        return
+
+    async with AsyncSessionLocal() as session:
+        q_target = await session.execute(
+            select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == target_id))
+        existing_role = q_target.scalars().first()
+
+        target_link = await format_user_link(chat_id, target_id, message.bot, session)
+        role_title = ROLE_MAP[new_role_id]
+
+        if existing_role:
+            existing_role.role_id = new_role_id
+            action_text = "обновлена"
+        else:
+            new_assignment = RoleAssignment(chat_id=chat_id, user_id=target_id, role_id=new_role_id)
+            session.add(new_assignment)
+            action_text = "выдана"
+
+        await session.commit()
+
+    await message.reply(
+        f"Пользователю {target_link} {action_text} роль: <b>{role_title}</b> <code>[{new_role_id}]</code>",
+        parse_mode="HTML")
+
+
+@router.message(F.text.regexp(r"(?i)^(\+|!|/)?(|снять|разжаловать|demote|unrole)\b"))
+async def cmd_demote(message: Message):
     parts = message.text.strip().split()
-    if len(parts) >= 2:
-        # find index of target token (if it's in text)
-        if target_display and isinstance(target_display, str) and target_display.startswith("@"):
-            try:
-                idx = message.text.index(target_display) + len(target_display)
-                rest = message.text[idx:].strip()
-                if rest:
-                    reason = rest
-            except ValueError:
-                reason = None
-        else:
-            # if reply, reason is after first token
-            rest = " ".join(parts[1:])
-            if rest:
-                reason = rest
-
-    if not target_user_id:
-        await message.reply("Не удалось определить пользователя. Ответьте на сообщение пользователя или укажите id (не @username).", parse_mode=cfg.PARSE_MODE)
-        return
-
-    async with AsyncSessionLocal() as session:
-        # upsert assignment
-        q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == target_user_id))
-        existing = q.scalars().first()
-        if existing:
-            existing.role_id = role_id
-            existing.assigned_by = caller_id
-            existing.reason = reason
-            existing.assigned_at = datetime.utcnow()
-            session.add(existing)
-        else:
-            ra = RoleAssignment(chat_id=chat_id, user_id=target_user_id, role_id=role_id, assigned_by=caller_id, reason=reason)
-            session.add(ra)
-        await session.commit()
-        # prepare link using nick or Telegram name
-        link = await format_user_link(chat_id, target_user_id, message.bot, session)
-
-    await message.reply(f"➕ {link} назначен на роль: {role_name(role_id)} [{role_id}]\nС большой силой приходит большая ответственность.", parse_mode=cfg.PARSE_MODE)
-
-
-# Remove admin: -админ / снять
-@router.message(lambda message: message.text and re.match(r"^(-админ|снять)\b", message.text.strip(), re.IGNORECASE))
-async def cmd_remove_admin(message: Message):
-    caller_id = message.from_user.id
+    issuer_id = message.from_user.id
     chat_id = message.chat.id
 
-    # Only owner can remove, enforced below
     async with AsyncSessionLocal() as session:
-        q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == caller_id))
-        caller_assign = q.scalars().first()
-    if not caller_assign or caller_assign.role_id != 5:
-        await message.reply("Только Владелец может снимать админов.", parse_mode=cfg.PARSE_MODE)
+        q = await session.execute(
+            select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == issuer_id))
+        issuer_role = q.scalars().first()
+
+    issuer_level = issuer_role.role_id if issuer_role else 0
+
+    # Разрешаем только Владельцу (ID 5) снимать роли
+    if issuer_level != 5:
+        await message.reply("<b>Только Владелец может снимать роли.</b>", parse_mode="HTML")
         return
 
-    target_user_id, target_display = await parse_target_user_from_message(message)
-    if not target_user_id:
-        await message.reply("Не удалось определить пользователя. Ответьте на сообщение пользователя или укажите id.", parse_mode=cfg.PARSE_MODE)
-        return
+    target_id = None
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+    elif len(parts) > 1 and parts[1].isdigit():
+        target_id = int(parts[1])
 
-    # Prevent removing yourself (owner cannot remove self)
-    if target_user_id == caller_id:
-        await message.reply("Нельзя снять роль у самого себя.", parse_mode=cfg.PARSE_MODE)
+    if not target_id:
+        await message.reply("<b>Укажите пользователя.</b>", parse_mode="HTML")
         return
 
     async with AsyncSessionLocal() as session:
-        q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == target_user_id))
-        existing = q.scalars().first()
-        if not existing:
-            await message.reply("У пользователя нет роли в этой группе.", parse_mode=cfg.PARSE_MODE)
+        q_target = await session.execute(
+            select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == target_id))
+        existing_role = q_target.scalars().first()
+
+        target_link = await format_user_link(chat_id, target_id, message.bot, session)
+
+        if not existing_role:
+            await message.reply(f"У {target_link} нет роли.", parse_mode="HTML")
             return
-        roleid = existing.role_id
-        await session.execute(delete(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == target_user_id))
+
+        await session.delete(existing_role)
         await session.commit()
-        link = await format_user_link(chat_id, target_user_id, message.bot, session)
 
-    await message.reply(f"➖ {link} снят с роли: {role_name(roleid)} [{roleid}]\nСпасибо за вклад в управление чатом.", parse_mode=cfg.PARSE_MODE)
-
-
-# Promote / demote (only one step)
-@router.message(lambda message: message.text and re.match(r"^(повысить|повышение|понизить|понижение)\b", message.text.strip(), re.IGNORECASE))
-async def cmd_promote_demote(message: Message):
-    caller_id = message.from_user.id
-    chat_id = message.chat.id
-    text = message.text.strip().split()[0].lower()
-    is_promote = text.startswith("повыш")
-
-    async with AsyncSessionLocal() as session:
-        q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == caller_id))
-        caller_assign = q.scalars().first()
-    if not caller_assign or caller_assign.role_id != 5:
-        await message.reply("Только Владелец может повышать/понижать.", parse_mode=cfg.PARSE_MODE)
-        return
-
-    target_user_id, target_display = await parse_target_user_from_message(message)
-    if not target_user_id:
-        await message.reply("Не удалось определить пользователя. Ответьте на сообщение пользователя или укажите id.", parse_mode=cfg.PARSE_MODE)
-        return
-
-    async with AsyncSessionLocal() as session:
-        q = await session.execute(select(RoleAssignment).where(RoleAssignment.chat_id == chat_id, RoleAssignment.user_id == target_user_id))
-        existing = q.scalars().first()
-        if not existing:
-            await message.reply("У пользователя нет назначенной роли.", parse_mode=cfg.PARSE_MODE)
-            return
-        old = existing.role_id
-        if is_promote:
-            new = min(5, old + 1)
-            if new == old:
-                await message.reply("Нельзя повысить выше существующей роли.", parse_mode=cfg.PARSE_MODE)
-                return
-            existing.role_id = new
-            session.add(existing)
-            await session.commit()
-            link = await format_user_link(chat_id, target_user_id, message.bot, session)
-            await message.reply(f"⬆️ {link} повышен до: {role_name(new)} [{new}]\nДоверие растёт — ответственность тоже.", parse_mode=cfg.PARSE_MODE)
-        else:
-            new = max(1, old - 1)
-            if new == old:
-                await message.reply("Нельзя понизить ниже минимальной роли.", parse_mode=cfg.PARSE_MODE)
-                return
-            existing.role_id = new
-            session.add(existing)
-            await session.commit()
-            link = await format_user_link(chat_id, target_user_id, message.bot, session)
-            await message.reply(f"⬇️ {link} понижен до: {role_name(new)} [{new}]\nРоль изменена, но вклад всё ещё ценится.", parse_mode=cfg.PARSE_MODE)
+    await message.reply(f"🗑 Роль у пользователя {target_link} была снята.", parse_mode="HTML")

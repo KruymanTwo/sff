@@ -79,14 +79,12 @@ async def main():
 
     await init_db()
 
-    # set bot commands
     commands = [
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="admins", description="Показать список админов")
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 
-    # start polling
     try:
         await dp.start_polling(bot)
     finally:
@@ -95,4 +93,18 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    import sys
+    import time
+    import os
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+
+        sys.stderr.write("\nОстановка бота...\n")
+    finally:
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        os._exit(0)

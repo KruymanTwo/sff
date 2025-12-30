@@ -13,12 +13,10 @@ router = Router()
 async def cmd_start(message: Message):
     nickname = message.from_user.full_name
     text = (
-        f"🍊 Привет, {nickname}. Вы подключились к Woxl -- Чат менеджер.\n"
-        "Я Вокс, бот для поддержки порядка, контроля нарушений и администрирования."
+        f"🍊 Привет, {nickname}. Вы подключились к Woxl -- Ваш чат менеджер по управлению группой!."
     )
     await message.answer(text, parse_mode=cfg.PARSE_MODE)
 
-    # Ensure chat exists in DB (for private chat this adds too)
     async with AsyncSessionLocal() as session:
         if message.chat:
             q = await session.execute(select(Chat).where(Chat.id == message.chat.id))
